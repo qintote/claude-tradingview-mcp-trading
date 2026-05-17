@@ -1,3 +1,5 @@
 Date,Time (UTC),Exchange,Symbol,Side,Quantity,Price,Total USD,Fee (est.),Net Amount,Order ID,Mode,Notes
 ,,,,,,,,,,,"NOTE","Hey, if you're at this stage of the video, you must be enjoying it... perhaps you could hit subscribe now? :)"
 2026-05-17,00:14:37,ALL,GOLD,,,4540.64500,,,,BLOCKED,"Failed: RSI(3) above 70 (reversal setup)"
+2026-05-17,04:57:26,ALL,GOLD,,,4540.64500,,,,BLOCKED,"RSI=25.59, Dist=0.60%"
+2026-05-17,08:57:27,ALL,GOLD,,,4540.64500,,,,BLOCKED,"RSI=25.59, Dist=0.60%"
