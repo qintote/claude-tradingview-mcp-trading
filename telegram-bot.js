@@ -807,6 +807,100 @@ async function pollOnce() {
   }
 }
 
+// ─── Session alerts ───────────────────────────────────────────────────────────
+
+// All times in UTC. day: 1=Mon … 5=Fri (0=Sun,6=Sat excluded for opens;
+// closes can fall on any day if the session started the prior evening).
+const SESSIONS = [
+  { name: "Sydney",  flag: "🇦🇺", open: { h: 22, m: 0 }, close: { h: 7,  m: 0 }, openDays:  [0,1,2,3,4], closeDays: [1,2,3,4,5] },
+  { name: "Tokyo",   flag: "🇯🇵", open: { h: 0,  m: 0 }, close: { h: 9,  m: 0 }, openDays:  [1,2,3,4,5], closeDays: [1,2,3,4,5] },
+  { name: "London",  flag: "🇬🇧", open: { h: 8,  m: 0 }, close: { h: 17, m: 0 }, openDays:  [1,2,3,4,5], closeDays: [1,2,3,4,5] },
+  { name: "New York",flag: "🇺🇸", open: { h: 13, m: 0 }, close: { h: 22, m: 0 }, openDays:  [1,2,3,4,5], closeDays: [1,2,3,4,5] },
+];
+
+// Overlaps we announce (purely informational, triggered at open time)
+const OVERLAPS = [
+  { at: { h: 8,  m: 0 }, label: "Tokyo/London overlap open",  days: [1,2,3,4,5] },
+  { at: { h: 9,  m: 0 }, label: "Tokyo/London overlap closed", days: [1,2,3,4,5] },
+  { at: { h: 13, m: 0 }, label: "London/NY overlap open",      days: [1,2,3,4,5] },
+  { at: { h: 17, m: 0 }, label: "London/NY overlap closed",    days: [1,2,3,4,5] },
+];
+
+function msUntilNext(utcHour, utcMin, allowedDays) {
+  const now = new Date();
+  // try today and up to 7 days ahead
+  for (let d = 0; d <= 7; d++) {
+    const candidate = new Date(Date.UTC(
+      now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + d,
+      utcHour, utcMin, 0, 0
+    ));
+    if (candidate <= now) continue;
+    if (allowedDays.includes(candidate.getUTCDay())) {
+      return candidate - now;
+    }
+  }
+  return 24 * 60 * 60 * 1000; // fallback: 24 h
+}
+
+async function sendSessionOpen(session) {
+  let xau = "";
+  try {
+    const { price, ema8, vwap } = await fetchTVIndicators(CONFIG.tvSymbol, "HOUR_4");
+    xau = `\n\n*XAUUSD* @ \`${price.toFixed(2)}\` | EMA8 \`${ema8.toFixed(2)}\` | VWAP \`${vwap?.toFixed(2) ?? "—"}\``;
+  } catch (_) { /* no data — send without */ }
+
+  await tgSend(TG_CHAT_ID,
+    `${session.flag} *${session.name} session open*${xau}`
+  );
+}
+
+async function sendSessionClose(session) {
+  await tgSend(TG_CHAT_ID,
+    `${session.flag} *${session.name} session closed*`
+  );
+}
+
+async function sendOverlap(overlap) {
+  await tgSend(TG_CHAT_ID, `⚡ *${overlap.label}*`);
+}
+
+function scheduleSessionAlerts() {
+  for (const s of SESSIONS) {
+    const scheduleOpen = () => {
+      const delay = msUntilNext(s.open.h, s.open.m, s.openDays);
+      setTimeout(async () => {
+        try { await sendSessionOpen(s); } catch (e) { console.error(`Session open error (${s.name}):`, e.message); }
+        scheduleOpen();
+      }, delay);
+      console.log(`${s.name} open alert in ${Math.round(delay / 60000)} min`);
+    };
+
+    const scheduleClose = () => {
+      const delay = msUntilNext(s.close.h, s.close.m, s.closeDays);
+      setTimeout(async () => {
+        try { await sendSessionClose(s); } catch (e) { console.error(`Session close error (${s.name}):`, e.message); }
+        scheduleClose();
+      }, delay);
+    };
+
+    scheduleOpen();
+    scheduleClose();
+  }
+
+  for (const ov of OVERLAPS) {
+    const scheduleOv = () => {
+      const delay = msUntilNext(ov.at.h, ov.at.m, ov.days);
+      setTimeout(async () => {
+        try { await sendOverlap(ov); } catch (e) { console.error(`Overlap alert error:`, e.message); }
+        scheduleOv();
+      }, delay);
+    };
+    scheduleOv();
+  }
+
+  console.log("Session open/close alerts scheduled");
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -832,6 +926,8 @@ async function main() {
   };
   setTimeout(scheduleCheck, FOUR_HOURS); // first check at next 4h mark
   console.log("4-hour market check scheduled");
+
+  scheduleSessionAlerts();
 
   // Polling loop
   console.log("Listening for messages...");
