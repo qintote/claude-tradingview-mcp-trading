@@ -34,6 +34,65 @@ const TG_API     = `https://api.telegram.org/bot${TG_TOKEN}`;
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+// ─── Access control ───────────────────────────────────────────────────────────
+
+// Normalize to digits-only for comparison (handles +971... vs 971...)
+const ALLOWED_PHONES = new Set(
+  (process.env.ALLOWED_PHONES || "")
+    .split(",").map(p => p.trim().replace(/\D/g, "")).filter(Boolean)
+);
+
+const AUTH_FILE = "authorized-users.json";
+const authorizedUsers = new Set(
+  [String(TG_CHAT_ID), // bot owner always allowed
+   ...(existsSync(AUTH_FILE) ? JSON.parse(readFileSync(AUTH_FILE, "utf8")) : [])]
+);
+
+function saveAuthorized() {
+  writeFileSync(AUTH_FILE, JSON.stringify([...authorizedUsers]));
+}
+
+function isAuthorized(chatId) {
+  return authorizedUsers.has(String(chatId));
+}
+
+async function requestContact(chatId) {
+  await tgPost("sendMessage", {
+    chat_id: chatId,
+    text: "🔒 *This bot is private.*\n\nShare your phone number to verify access:",
+    parse_mode: "Markdown",
+    reply_markup: {
+      keyboard: [[{ text: "📱 Share my number", request_contact: true }]],
+      one_time_keyboard: true,
+      resize_keyboard: true,
+    },
+  });
+}
+
+async function handleContact(chatId, contact) {
+  const phone = contact.phone_number.replace(/\D/g, "");
+  // Match regardless of leading country code variations
+  const allowed = [...ALLOWED_PHONES].some(p => phone.endsWith(p) || p.endsWith(phone));
+  if (allowed) {
+    authorizedUsers.add(String(chatId));
+    saveAuthorized();
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: "✅ *Access granted!* Send /start to begin.",
+      parse_mode: "Markdown",
+      reply_markup: { remove_keyboard: true },
+    });
+    console.log(`Access granted: ${chatId} (${contact.phone_number})`);
+  } else {
+    await tgPost("sendMessage", {
+      chat_id: chatId,
+      text: "❌ Your number is not on the authorized list.",
+      reply_markup: { remove_keyboard: true },
+    });
+    console.log(`Access denied: ${chatId} (${contact.phone_number})`);
+  }
+}
+
 // ─── Telegram helpers ─────────────────────────────────────────────────────────
 
 async function tgPost(method, body) {
@@ -691,9 +750,26 @@ async function pollOnce() {
       continue;
     }
 
-    if (upd.message?.text && String(upd.message.chat.id) === String(TG_CHAT_ID)) {
+    if (upd.message) {
+      const msg = upd.message;
+
+      // Phone number shared for verification
+      if (msg.contact) {
+        await handleContact(msg.chat.id, msg.contact);
+        continue;
+      }
+
+      // Block unauthorized users
+      if (!isAuthorized(msg.chat.id)) {
+        await requestContact(msg.chat.id);
+        continue;
+      }
+    }
+
+    if (upd.message?.text) {
       const msg  = upd.message;
       const text = msg.text;
+      if (!isAuthorized(msg.chat.id)) continue; // already handled above, safety net
       if (text === "/start") {
         await tgSend(msg.chat.id,
           "🤖 *AIAutoTrader ready*\n\nAsk me anything about the markets:\n" +
