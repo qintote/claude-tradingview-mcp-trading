@@ -104,6 +104,30 @@ export async function capitalPlaceOrder(
   return res.json();
 }
 
+export async function capitalGetAccounts() {
+  const res = await fetch(`${BASE_URL}/api/v1/accounts`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Get accounts failed (${res.status})`);
+  return res.json();
+}
+
+export async function capitalSwitchAccount(accountId) {
+  const res = await fetch(`${BASE_URL}/api/v1/session`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify({ accountId }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Switch account failed (${res.status}): ${body}`);
+  }
+  // Capital.com issues fresh tokens after an account switch
+  const newCst = res.headers.get("CST");
+  const newToken = res.headers.get("X-SECURITY-TOKEN");
+  if (newCst) _cst = newCst;
+  if (newToken) _securityToken = newToken;
+  return res.json();
+}
+
 export function capitalCredentialsSet() {
   return !!(
     process.env.CAPITAL_API_KEY &&

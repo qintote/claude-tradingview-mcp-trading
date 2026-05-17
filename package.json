@@ -1,7 +1,8 @@
 {
   "name": "claude-tradingview-mcp-trading",
   "version": "1.0.0",
-  "description": "Automated trading bot — Claude + TradingView strategy + BitGet execution",
+  "description": "Automated trading bot — Claude + TradingView + Capital.com + Exness/MT5",
+  "type": "module",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
