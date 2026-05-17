@@ -57,6 +57,7 @@ function isAuthorized(chatId) {
 }
 
 async function requestContact(chatId) {
+  console.log(`Unauthorized access attempt from chatId: ${chatId} — requesting contact`);
   await tgPost("sendMessage", {
     chat_id: chatId,
     text: "🔒 *This bot is private.*\n\nShare your phone number to verify access:",
@@ -70,9 +71,15 @@ async function requestContact(chatId) {
 }
 
 async function handleContact(chatId, contact) {
-  const phone = contact.phone_number.replace(/\D/g, "");
-  // Match regardless of leading country code variations
-  const allowed = [...ALLOWED_PHONES].some(p => phone.endsWith(p) || p.endsWith(phone));
+  const raw   = contact.phone_number;
+  // Strip non-digits and leading zeros for flexible matching
+  const strip = s => s.replace(/\D/g, "").replace(/^0+/, "");
+  const phone = strip(raw);
+  console.log(`Contact received: ${raw} → normalized: ${phone} | allowed list: ${[...ALLOWED_PHONES].map(strip).join(",")}`);
+  const allowed = [...ALLOWED_PHONES].some(p => {
+    const np = strip(p);
+    return phone === np || phone.endsWith(np) || np.endsWith(phone);
+  });
   if (allowed) {
     authorizedUsers.add(String(chatId));
     saveAuthorized();
