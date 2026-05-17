@@ -147,6 +147,80 @@ async function fetchTVIndicators(tvSymbol, timeframe) {
   };
 }
 
+// ─── Telegram approval ───────────────────────────────────────────────────────
+
+const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TG_API     = TG_TOKEN ? `https://api.telegram.org/bot${TG_TOKEN}` : null;
+
+async function tgPost(method, body) {
+  const res = await fetch(`${TG_API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+async function sendTradeAlert(signal, price, ema8, vwap, rsi3) {
+  const emoji = signal === "BUY" ? "🟢" : "🔴";
+  const dist  = ((Math.abs(price - vwap) / vwap) * 100).toFixed(2);
+  const text  =
+    `${emoji} *${signal} SETUP — XAUUSD*\n\n` +
+    `Price : \`${price.toFixed(2)}\`\n` +
+    `EMA(8): \`${ema8.toFixed(2)}\`\n` +
+    `VWAP  : \`${vwap.toFixed(2)}\`\n` +
+    `RSI(3): \`${rsi3.toFixed(2)}\`\n` +
+    `Dist  : \`${dist}%\` from VWAP\n\n` +
+    `_Waiting for approval — expires in 10 min_`;
+
+  const r = await tgPost("sendMessage", {
+    chat_id: TG_CHAT_ID,
+    text,
+    parse_mode: "Markdown",
+    reply_markup: {
+      inline_keyboard: [[
+        { text: "✅ Approve", callback_data: "APPROVE" },
+        { text: "❌ Reject",  callback_data: "REJECT"  },
+      ]],
+    },
+  });
+  return r.result?.message_id;
+}
+
+async function waitForApproval(messageId, timeoutMs = 10 * 60 * 1000) {
+  // Discard any pre-existing updates before we start polling
+  const init = await tgPost("getUpdates", { limit: 1, offset: -1 });
+  let offset  = init.result?.length ? init.result[0].update_id + 1 : 0;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const remaining = Math.ceil((deadline - Date.now()) / 1000);
+    const { result: updates } = await tgPost("getUpdates", {
+      offset,
+      timeout: Math.min(30, remaining),
+      allowed_updates: ["callback_query"],
+    });
+    for (const upd of updates || []) {
+      offset = upd.update_id + 1;
+      const cb = upd.callback_query;
+      if (cb?.message?.message_id !== messageId) continue;
+      await tgPost("answerCallbackQuery", { callback_query_id: cb.id });
+      return cb.data; // "APPROVE" or "REJECT"
+    }
+  }
+  return "TIMEOUT";
+}
+
+async function editAlert(messageId, text) {
+  await tgPost("editMessageText", {
+    chat_id: TG_CHAT_ID,
+    message_id: messageId,
+    text,
+    parse_mode: "Markdown",
+  });
+}
+
 // Session VWAP — resets at midnight UTC.
 // Capital.com forex candles have no real volume; we fall back to volume=1
 // so VWAP degrades gracefully to a simple average of typical prices.
@@ -360,7 +434,6 @@ async function run() {
     const failed = results.filter((r) => !r.pass).map((r) => r.label);
     console.log("🚫 TRADE BLOCKED");
     failed.forEach((f) => console.log(`   - ${f}`));
-
     writeTradeCsv({
       timestamp, broker: "ALL", symbol: CONFIG.capitalEpic,
       price, mode: "BLOCKED", notes: `Failed: ${failed.join("; ")}`,
@@ -368,14 +441,39 @@ async function run() {
   } else {
     console.log(`✅ ALL CONDITIONS MET — ${signal}`);
 
-    if (CONFIG.paperTrading) {
+    // ── Telegram approval gate ──
+    let approved = true;
+    if (TG_API && TG_CHAT_ID && !CONFIG.paperTrading) {
+      console.log("\n📱 Sending Telegram alert — waiting up to 10 min for approval...");
+      const msgId   = await sendTradeAlert(signal, price, ema8, vwap, rsi3);
+      const decision = await waitForApproval(msgId);
+
+      if (decision === "APPROVE") {
+        console.log("✅ Approved via Telegram");
+        await editAlert(msgId, `✅ *Approved* — ${signal} XAUUSD order being placed...`);
+      } else if (decision === "REJECT") {
+        console.log("❌ Rejected via Telegram");
+        await editAlert(msgId, `❌ *Rejected* — ${signal} setup skipped`);
+        approved = false;
+      } else {
+        console.log("⏰ Approval timed out — skipping trade");
+        await editAlert(msgId, `⏰ *Expired* — no response in 10 min, setup skipped`);
+        approved = false;
+      }
+      logEntry.telegramDecision = decision;
+    }
+
+    if (!approved) {
+      writeTradeCsv({
+        timestamp, broker: "ALL", symbol: CONFIG.capitalEpic,
+        price, mode: "REJECTED", notes: `Telegram: ${logEntry.telegramDecision}`,
+      });
+    } else if (CONFIG.paperTrading) {
       console.log(`\n📋 PAPER TRADE — would ${signal} ${CONFIG.capitalEpic} on Capital.com`);
-      console.log(`📋 PAPER TRADE — would ${signal} ${CONFIG.mt5Symbol} on Exness/MT5`);
       console.log(`   (Set PAPER_TRADING=false in .env to place real orders)`);
       logEntry.orderPlaced = true;
-
       writeTradeCsv({ timestamp, broker: "Capital.com", symbol: CONFIG.capitalEpic, side: signal, size: CONFIG.capitalSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: `PAPER-CAP-${Date.now()}`, mode: "PAPER", notes: "All conditions met" });
-      writeTradeCsv({ timestamp, broker: "Exness/MT5",  symbol: CONFIG.mt5Symbol,  side: signal, size: CONFIG.mt5LotSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: `PAPER-MT5-${Date.now()}`, mode: "PAPER", notes: "All conditions met" });
+      writeTradeCsv({ timestamp, broker: "Exness/MT5",  symbol: CONFIG.mt5Symbol,  side: signal, size: CONFIG.mt5LotSize,   price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: `PAPER-MT5-${Date.now()}`, mode: "PAPER", notes: "All conditions met" });
     } else {
       // ── Capital.com live order ──
       try {
@@ -384,8 +482,17 @@ async function run() {
         const capId = capResult.dealReference || capResult.dealId || "unknown";
         console.log(`✅ Capital.com order placed — ${capId}`);
         logEntry.capitalOrderId = capId;
-        logEntry.orderPlaced = true;
-        writeTradeCsv({ timestamp, broker: "Capital.com", symbol: CONFIG.capitalEpic, side: signal, size: CONFIG.capitalSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: capId, mode: "LIVE", notes: "All conditions met" });
+        logEntry.orderPlaced    = true;
+        writeTradeCsv({ timestamp, broker: "Capital.com", symbol: CONFIG.capitalEpic, side: signal, size: CONFIG.capitalSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: capId, mode: "LIVE", notes: "Approved via Telegram" });
+        if (TG_API && TG_CHAT_ID) {
+          const msgId = logEntry.telegramDecision ? undefined : null;
+          // notify confirmation (best-effort)
+          await tgPost("sendMessage", {
+            chat_id: TG_CHAT_ID,
+            text: `✅ *Order placed* — ${signal} XAUUSD @ \`${price.toFixed(2)}\`\nDeal: \`${capId}\``,
+            parse_mode: "Markdown",
+          }).catch(() => {});
+        }
       } catch (err) {
         console.log(`❌ Capital.com failed: ${err.message}`);
         writeTradeCsv({ timestamp, broker: "Capital.com", symbol: CONFIG.capitalEpic, side: signal, price, mode: "LIVE", notes: `Error: ${err.message}` });
@@ -395,14 +502,13 @@ async function run() {
       if (mt5Enabled()) {
         try {
           console.log(`\n🔴 Exness/MT5 — ${signal} ${CONFIG.mt5Symbol} lots=${CONFIG.mt5LotSize}`);
-          console.log(`   Signal file: ${getSignalFilePath()}`);
-          const mt5Sig = sendMT5Signal({ symbol: CONFIG.mt5Symbol, action: signal, lotSize: CONFIG.mt5LotSize });
+          const mt5Sig    = sendMT5Signal({ symbol: CONFIG.mt5Symbol, action: signal, lotSize: CONFIG.mt5LotSize });
           const mt5Result = await waitForMT5Result(mt5Sig.id);
           if (mt5Result.success) {
             console.log(`✅ MT5 order placed — ticket #${mt5Result.ticket}`);
-            logEntry.mt5Ticket = mt5Result.ticket;
+            logEntry.mt5Ticket  = mt5Result.ticket;
             logEntry.orderPlaced = true;
-            writeTradeCsv({ timestamp, broker: "Exness/MT5", symbol: CONFIG.mt5Symbol, side: signal, size: CONFIG.mt5LotSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: String(mt5Result.ticket), mode: "LIVE", notes: "All conditions met" });
+            writeTradeCsv({ timestamp, broker: "Exness/MT5", symbol: CONFIG.mt5Symbol, side: signal, size: CONFIG.mt5LotSize, price, totalUSD: CONFIG.maxTradeSizeUSD, orderId: String(mt5Result.ticket), mode: "LIVE", notes: "Approved via Telegram" });
           } else {
             console.log(`❌ MT5 order failed: ${mt5Result.error}`);
             writeTradeCsv({ timestamp, broker: "Exness/MT5", symbol: CONFIG.mt5Symbol, side: signal, price, mode: "LIVE", notes: `Error: ${mt5Result.error}` });
