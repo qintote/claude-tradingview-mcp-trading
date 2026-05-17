@@ -550,7 +550,7 @@ const TOOLS = [
 
 const SYSTEM = `You are AIAutoTrader's market assistant — a concise, data-driven trading analyst.
 Answer using real data from the tools. Be direct: state price, key indicator values, and a clear bias.
-Format with Markdown. Keep responses under 3500 characters. Never hallucinate numbers — only use tool data.`;
+Format with Markdown. Keep responses under 2800 characters — one short message, no padding. Never hallucinate numbers — only use tool data.`;
 
 async function runClaude(userText) {
   const messages = [{ role: "user", content: userText }];
@@ -558,7 +558,7 @@ async function runClaude(userText) {
   for (let i = 0; i < 8; i++) {
     const res = await anthropic.messages.create({
       model: "claude-sonnet-4-6",
-      max_tokens: 1024,
+      max_tokens: 700,
       system: SYSTEM,
       tools: TOOLS,
       messages,
