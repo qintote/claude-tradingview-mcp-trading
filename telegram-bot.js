@@ -760,10 +760,19 @@ async function pollOnce() {
     if (upd.message) {
       const msg = upd.message;
 
-      // Phone number shared for verification
+      // Phone number shared via button or typed as text
       if (msg.contact) {
         await handleContact(msg.chat.id, msg.contact);
         continue;
+      }
+
+      // Fallback: unauthorized user typed a phone number manually
+      if (!isAuthorized(msg.chat.id) && msg.text) {
+        const digits = msg.text.trim().replace(/\D/g, "");
+        if (digits.length >= 7) {
+          await handleContact(msg.chat.id, { phone_number: msg.text.trim() });
+          continue;
+        }
       }
 
       // Block unauthorized users
